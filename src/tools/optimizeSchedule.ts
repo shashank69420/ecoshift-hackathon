@@ -1,82 +1,85 @@
 // src/tools/optimizeSchedule.ts
-
+import { getProductionSchedule } from "../data/schedule";
+import { getGridPricing } from "../data/gridPricing";
+import { Job, OptimizedJob, OptimizationResult } from "../types";
 import {
   calculateJobCost,
   findCheapestValidWindow,
-  isDeadlineMet,
-  MachineJob,
-  HourlyPrice,
+  getHourFromIso,
 } from "./optimizerHelpers";
 
-// TEMP: replace with real imports once Person A pushes:
-// import { gridPricing } from "../data/gridPricing";
-// import { machineJobs } from "../data/schedule";
-import { gridPricing } from "../data/gridPricing";
-import { machineJobs } from "../data/schedule";
+function isoAtHour(referenceIso: string, hour: number): string {
+  const d = new Date(referenceIso);
+  d.setHours(hour, 0, 0, 0);
+  return d.toISOString();
+}
 
 export const optimizeScheduleTool = {
   name: "optimize_schedule",
   description:
-    "Given a specific factory job (by ID) and an optional delay in hours, " +
-    "calculates the electricity cost if the job runs at its originally " +
-    "scheduled time vs. delayed by the given number of hours, and reports " +
-    "the savings. Also reports the single cheapest possible start time " +
-    "for that job across the full day, respecting its deadline.",
+    "Analyzes today's factory production schedule against current electricity " +
+    "pricing and finds the cheapest valid start time for each job (or a specific " +
+    "job by ID), without violating its deadline. Returns cost savings per job " +
+    "and in total. Use this when the user asks about reducing energy costs, " +
+    "rescheduling jobs, or wants to know potential savings.",
   inputSchema: {
     type: "object",
     properties: {
       jobId: {
         type: "string",
-        description: "The ID of the job to analyze, e.g. 'job-1'",
-      },
-      delayHours: {
-        type: "number",
-        description: "How many hours to delay the job by, for comparison. Defaults to 2.",
+        description:
+          "Optional. If provided, only this job is analyzed. Otherwise all jobs are optimized.",
       },
     },
-    required: ["jobId"],
+    required: [],
   },
-  handler: async (input: { jobId: string; delayHours?: number }) => {
-    const delay = input.delayHours ?? 2;
+  handler: async (input: { jobId?: string }): Promise<OptimizationResult> => {
+    const allJobs = getProductionSchedule();
+    const prices = getGridPricing();
 
-    const job = machineJobs.find((j: MachineJob) => j.id === input.jobId);
-    if (!job) {
+    const jobsToOptimize = input.jobId
+      ? allJobs.filter((j) => j.id === input.jobId)
+      : allJobs;
+
+    const optimizedJobs: OptimizedJob[] = jobsToOptimize.map((job: Job) => {
+      const originalStartHour = getHourFromIso(job.scheduledStart);
+      const costOriginal = calculateJobCost(job, originalStartHour, prices);
+
+      const cheapestHour = findCheapestValidWindow(job, prices);
+      const foundBetterSlot = cheapestHour !== -1;
+
+      const costOptimized = foundBetterSlot
+        ? calculateJobCost(job, cheapestHour, prices)
+        : costOriginal;
+
+      const newStart = foundBetterSlot
+        ? isoAtHour(job.scheduledStart, cheapestHour)
+        : job.scheduledStart;
+
       return {
-        error: `No job found with id "${input.jobId}". Available IDs: ${machineJobs
-          .map((j: MachineJob) => j.id)
-          .join(", ")}`,
+        id: job.id,
+        jobName: job.jobName,
+        machineId: job.machineId,
+        powerKw: job.powerKw,
+        durationHours: job.durationHours,
+        deadline: job.deadline,
+        originalStart: job.scheduledStart,
+        newStart,
+        moved: foundBetterSlot && cheapestHour !== originalStartHour,
+        costOriginal,
+        costOptimized,
+        savings: costOriginal - costOptimized,
       };
-    }
+    });
 
-    // Assume the job's "original" start is right now for demo purposes —
-    // in a fuller version this would come from the schedule data itself.
-    const originalStartHour = 0; // placeholder until Person A's schedule includes a start hour
-    const delayedStartHour = originalStartHour + delay;
-
-    const originalCost = calculateJobCost(job, originalStartHour, gridPricing);
-    const delayMeetsDeadline = isDeadlineMet(job, delayedStartHour);
-
-    const delayedCost = delayMeetsDeadline
-      ? calculateJobCost(job, delayedStartHour, gridPricing)
-      : null;
-
-    const cheapestHour = findCheapestValidWindow(job, gridPricing);
-    const cheapestCost =
-      cheapestHour === -1 ? null : calculateJobCost(job, cheapestHour, gridPricing);
+    const originalTotalCost = optimizedJobs.reduce((sum, j) => sum + j.costOriginal, 0);
+    const optimizedTotalCost = optimizedJobs.reduce((sum, j) => sum + j.costOptimized, 0);
 
     return {
-      jobId: job.id,
-      machineName: job.machineName,
-      originalStartHour,
-      originalCost,
-      delayHours: delay,
-      delayedStartHour,
-      delayMeetsDeadline,
-      delayedCost,
-      savingsFromDelay: delayedCost !== null ? originalCost - delayedCost : null,
-      cheapestPossibleStartHour: cheapestHour === -1 ? "No valid window found" : cheapestHour,
-      cheapestPossibleCost: cheapestCost,
-      maxPossibleSavings: cheapestCost !== null ? originalCost - cheapestCost : null,
+      originalTotalCost,
+      optimizedTotalCost,
+      totalSavings: originalTotalCost - optimizedTotalCost,
+      jobs: optimizedJobs,
     };
   },
 };
