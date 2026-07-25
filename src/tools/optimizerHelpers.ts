@@ -1,72 +1,59 @@
-// ── Temporary local types ──────────────────────────────────────
-// These match what Person A's types.ts will export.
-// Once A pushes the real file, delete this block and replace with:
-// import type { HourlyPrice, MachineJob } from "../types";
-
-export interface HourlyPrice {
-  hour: number;        // 0–23
-  pricePerKwh: number;
-}
-
-export interface MachineJob {
-  id: string;
-  machineName: string;
-  durationHours: number;
-  powerDrawKw: number;
-  deadlineHour: number;      // must finish by this hour
-  priority: "low" | "medium" | "high";
-  latePenaltyCost: number;
-}
-// ────────────────────────────────────────────────────────────────
+// src/tools/optimizerHelpers.ts
+import { Job, GridPricePoint } from "../types";
 
 /**
- * Calculates the total electricity cost of running a job
- * if it starts at a given hour.
- *
- * Logic: a job that takes `durationHours` starting at `startHour`
- * "occupies" that many consecutive hours. We look up the price
- * for each of those hours and sum (price × power draw).
+ * Extracts the local hour-of-day (0-23) from an ISO datetime string.
+ */
+function getHourFromIso(iso: string): number {
+  return new Date(iso).getHours();
+}
+
+/**
+ * Calculates the total electricity cost of running a job if it starts
+ * at a given hour-of-day.
  */
 export function calculateJobCost(
-  job: MachineJob,
+  job: Job,
   startHour: number,
-  prices: HourlyPrice[]
+  prices: GridPricePoint[]
 ): number {
   let totalCost = 0;
 
   for (let i = 0; i < job.durationHours; i++) {
-    const hour = (startHour + i) % 24; // wraps past midnight
+    const hour = (startHour + i) % 24;
     const priceEntry = prices.find((p) => p.hour === hour);
 
     if (!priceEntry) {
       throw new Error(`No price data found for hour ${hour}`);
     }
 
-    totalCost += priceEntry.pricePerKwh * job.powerDrawKw;
+    totalCost += priceEntry.price * job.powerKw;
   }
 
   return totalCost;
 }
 
 /**
- * Checks whether starting the job at `startHour` lets it
- * finish before its deadline.
+ * Checks whether starting the job at `startHour` still meets both:
+ *  - earliestStart (can't run before this hour)
+ *  - deadline (must finish by this hour)
  */
-export function isDeadlineMet(job: MachineJob, startHour: number): boolean {
+export function isDeadlineMet(job: Job, startHour: number): boolean {
+  const earliestHour = getHourFromIso(job.earliestStart);
+  const deadlineHour = getHourFromIso(job.deadline);
   const finishHour = startHour + job.durationHours;
-  return finishHour <= job.deadlineHour;
+
+  return startHour >= earliestHour && finishHour <= deadlineHour;
 }
 
 /**
- * Scans every possible start hour (0–23), keeps only the ones
- * that meet the deadline, and returns the cheapest valid one.
- *
- * Returns -1 if no valid window exists at all (job literally
- * cannot meet its deadline no matter when it starts).
+ * Scans every possible start hour (0-23), keeps only the ones that
+ * respect earliestStart + deadline, and returns the cheapest valid one.
+ * Returns -1 if no valid window exists at all.
  */
 export function findCheapestValidWindow(
-  job: MachineJob,
-  prices: HourlyPrice[]
+  job: Job,
+  prices: GridPricePoint[]
 ): number {
   let bestHour = -1;
   let bestCost = Infinity;
@@ -84,3 +71,5 @@ export function findCheapestValidWindow(
 
   return bestHour;
 }
+
+export { getHourFromIso };
